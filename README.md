@@ -4,10 +4,23 @@
 
 支持 [Paper](https://papermc.io/)（及其分支，如 [Purpur](https://purpurmc.org/)）与 [Folia](https://papermc.io/software/folia)，请勿安装到 Spigot 上！
 
-**支持服务端版本：** Minecraft 26.1.2（Paper / Folia）
-**运行环境要求：** Java 25+
+**支持服务端版本：** Minecraft 26.3、26.1.2 与 1.21.11（Paper / Folia）
+**运行环境要求：** Java 21+
 
 [Modrinth](https://modrinth.com/plugin/codframe)
+
+## 构建
+
+```bash
+bash scripts/build.sh                     # Paper 26.3，默认
+PAPER_API_VERSION=1.21.11 bash scripts/build.sh
+PAPER_API_VERSION=26.1.2 bash scripts/build.sh
+```
+
+产物写入 `dist/CodFrame-1.3.0-<Paper版本>.jar`。1.21.x 产物声明
+`api-version: 1.21`，可通用于 1.21.1 至 1.21.11；26.3 产物声明
+`api-version: 26.3`。直接执行 `mvn clean package` 仍会构建默认的 Paper 26.3
+版本（Java 21 字节码）。
 
 ## 为什么用 CodFrame
 

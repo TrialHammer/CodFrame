@@ -1,7 +1,7 @@
 name: CodFrame
-version: '${project.version}'
+version: '${project.version}-${paper.version}'
 main: com.ghostchu.codframe.CodFrame
-api-version: '26.1.2'
+api-version: '${paper.api-version}'
 folia-supported: true
 softdepend:
   - LastLoginAPI
