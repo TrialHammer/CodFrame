@@ -21,9 +21,11 @@ import org.bukkit.event.entity.EntityDamageByEntityEvent;
 import org.bukkit.event.entity.EntityDamageEvent;
 import org.bukkit.event.hanging.HangingBreakEvent;
 import org.bukkit.event.player.PlayerInteractEntityEvent;
+import org.bukkit.event.world.EntitiesLoadEvent;
 import org.bukkit.inventory.EquipmentSlot;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.meta.BookMeta;
+import org.bukkit.persistence.PersistentDataContainer;
 import org.bukkit.persistence.PersistentDataType;
 import org.bukkit.plugin.java.JavaPlugin;
 import org.jetbrains.annotations.NotNull;
@@ -34,8 +36,21 @@ import java.util.concurrent.ConcurrentHashMap;
 
 public final class CodFrame extends JavaPlugin implements Listener {
     private final NamespacedKey KEY = new NamespacedKey(this, "owner");
+    private final NamespacedKey NAME_KEY = new NamespacedKey(this, "owner_name");
     private final MiniMessage MINI_MESSAGE = MiniMessage.miniMessage();
     private final ConcurrentHashMap<UUID, String> nameCache = new ConcurrentHashMap<>();
+
+    /**
+     * Legacy HammerCore item-frame-lock storage. HammerCore builds its keys with
+     * {@code new NamespacedKey(plugin, key)}, which lowercases the key, so the
+     * values on disk are {@code hammercore:owneruuid}, {@code hammercore:ownerusername}
+     * and {@code hammercore:header}.
+     */
+    private final NamespacedKey LEGACY_OWNER_UUID = new NamespacedKey("hammercore", "owneruuid");
+    private final NamespacedKey LEGACY_OWNER_NAME = new NamespacedKey("hammercore", "ownerusername");
+    private final NamespacedKey LEGACY_HEADER = new NamespacedKey("hammercore", "header");
+
+    private boolean migrateHammerCore;
 
     LastLoginAPI lastLoginAPI;
 
@@ -43,6 +58,7 @@ public final class CodFrame extends JavaPlugin implements Listener {
     public void onEnable() {
         // Plugin startup logic
         saveDefaultConfig();
+        migrateHammerCore = getConfig().getBoolean("migration.hammercore", true);
 
         if (getServer().getPluginManager().getPlugin("LastLoginAPI") != null) {
             if (getServer().getPluginManager().getPlugin("LastLoginAPI").isEnabled()) {
@@ -58,28 +74,102 @@ public final class CodFrame extends JavaPlugin implements Listener {
         // Plugin shutdown logic
     }
 
-    private static boolean isFolia() {
-        try {
-            Class.forName("io.papermc.paper.threadedregions.RegionizedServer");
-            return true;
-        } catch (ClassNotFoundException e) {
-            return false;
-        }
-    }
-
+    /**
+     * Reads the CodFrame owner without touching the frame. Kept side-effect free
+     * so other plugins may call it from any thread that already owns the entity.
+     */
     public Optional<UUID> queryProtection(ItemFrame frame) {
         String dat = frame.getPersistentDataContainer().get(KEY, PersistentDataType.STRING);
         if (dat == null) {
             return Optional.empty();
         }
-        UUID uuid = UUID.fromString(dat);
-        return Optional.of(uuid);
+        try {
+            return Optional.of(UUID.fromString(dat));
+        } catch (IllegalArgumentException ignored) {
+            // Corrupted CodFrame entry: treat the frame as unprotected.
+            return Optional.empty();
+        }
+    }
+
+    /**
+     * Returns the CodFrame owner, importing a legacy HammerCore lock on the way if
+     * one exists. Must be called from the thread that owns the frame's region.
+     */
+    private Optional<UUID> resolveProtection(ItemFrame frame) {
+        Optional<UUID> current = queryProtection(frame);
+        if (current.isPresent()) {
+            return current;
+        }
+        return migrateLegacyProtection(frame);
+    }
+
+    /**
+     * Converts a HammerCore item-frame lock into CodFrame's own format.
+     *
+     * <p>HammerCore stored the owner UUID as a two-element {@code LONG_ARRAY} plus the
+     * owner name as a string. CodFrame keeps a single {@code owner} UUID string and an
+     * auxiliary {@code owner_name} so the owner can still be displayed after a restart
+     * without LastLoginAPI. Legacy keys are removed only once the CodFrame entry has
+     * been written, so a failed migration never loses the original data.</p>
+     */
+    private Optional<UUID> migrateLegacyProtection(ItemFrame frame) {
+        if (!migrateHammerCore) {
+            return Optional.empty();
+        }
+
+        PersistentDataContainer data = frame.getPersistentDataContainer();
+        long[] rawUuid = data.get(LEGACY_OWNER_UUID, PersistentDataType.LONG_ARRAY);
+        String legacyName = data.get(LEGACY_OWNER_NAME, PersistentDataType.STRING);
+
+        UUID owner;
+        if (rawUuid != null) {
+            if (rawUuid.length != 2) {
+                getLogger().warning("Ignoring malformed HammerCore owner UUID on frame at " + describe(frame));
+                return Optional.empty();
+            }
+            owner = new UUID(rawUuid[0], rawUuid[1]);
+        } else if (legacyName != null && !legacyName.isBlank()) {
+            // Defensive fallback for a partially written HammerCore record. Resolving a
+            // name is only possible when the server already knows that player.
+            OfflinePlayer offlineOwner = Bukkit.getOfflinePlayer(legacyName);
+            if (!offlineOwner.hasPlayedBefore() && !offlineOwner.isOnline()) {
+                getLogger().warning("Cannot migrate HammerCore frame at " + describe(frame)
+                        + ": unknown owner '" + legacyName + "'");
+                return Optional.empty();
+            }
+            owner = offlineOwner.getUniqueId();
+        } else {
+            return Optional.empty();
+        }
+
+        data.set(KEY, PersistentDataType.STRING, owner.toString());
+        if (legacyName != null && !legacyName.isBlank()) {
+            data.set(NAME_KEY, PersistentDataType.STRING, legacyName);
+            nameCache.put(owner, legacyName);
+        }
+        data.remove(LEGACY_OWNER_UUID);
+        data.remove(LEGACY_OWNER_NAME);
+        data.remove(LEGACY_HEADER);
+
+        // HammerCore protected frames through event cancellation only; CodFrame also
+        // freezes and invulnerates them, so apply those flags during the migration.
+        frame.setFixed(true);
+        frame.setInvulnerable(true);
+
+        getLogger().info("Migrated HammerCore frame protection at " + describe(frame)
+                + " to CodFrame (owner " + (legacyName != null ? legacyName : owner) + ")");
+        return Optional.of(owner);
+    }
+
+    private static String describe(ItemFrame frame) {
+        return frame.getWorld().getName() + " " + frame.getLocation().getBlockX()
+                + "," + frame.getLocation().getBlockY() + "," + frame.getLocation().getBlockZ();
     }
 
     public boolean claimProtection(ItemFrame frame, UUID uuid) {
         frame.setFixed(true);
         frame.setInvulnerable(true);
-        if (queryProtection(frame).isPresent()) {
+        if (resolveProtection(frame).isPresent()) {
             return false;
         }
         frame.getPersistentDataContainer().set(KEY, PersistentDataType.STRING, uuid.toString());
@@ -87,11 +177,12 @@ public final class CodFrame extends JavaPlugin implements Listener {
     }
 
     public boolean removeProtection(ItemFrame frame, UUID uuid) {
-        if (!queryProtection(frame).isPresent()) {
+        if (resolveProtection(frame).isEmpty()) {
             return false;
         }
         frame.setFixed(false);
         frame.getPersistentDataContainer().remove(KEY);
+        frame.getPersistentDataContainer().remove(NAME_KEY);
         frame.setInvulnerable(false);
         return true;
     }
@@ -113,16 +204,18 @@ public final class CodFrame extends JavaPlugin implements Listener {
     public void playerDoProtection(Player player, ItemFrame frame) {
         getServer().getRegionScheduler().execute(this, frame.getLocation(), () -> {
             if (claimProtection(frame, player.getUniqueId())) {
+                frame.getPersistentDataContainer().set(NAME_KEY, PersistentDataType.STRING, player.getName());
+                nameCache.put(player.getUniqueId(), player.getName());
                 player.sendMessage(MINI_MESSAGE.deserialize(getConfig().getString("messages.frame.success-set", "")));
             } else {
-                Optional<UUID> uuid = queryProtection(frame);
+                Optional<UUID> uuid = resolveProtection(frame);
                 if (uuid.get().equals(player.getUniqueId()) || player.hasPermission("codframe.admin")) {
                     removeProtection(frame, player.getUniqueId());
                     player.sendMessage(MINI_MESSAGE.deserialize(getConfig().getString("messages.frame.success-remove", "")));
                 } else {
                     String message = getConfig()
                             .getString("messages.frame.failed-other-protected", "")
-                            .replace("<0>", getPlayerName(uuid.get()));
+                            .replace("<0>", getPlayerName(frame, uuid.get()));
                     player.sendMessage(MINI_MESSAGE.deserialize(message));
                 }
             }
@@ -148,7 +241,7 @@ public final class CodFrame extends JavaPlugin implements Listener {
     @EventHandler(ignoreCancelled = true)
     public void onFrameDropping(HangingBreakEvent event) {
         if (event.getEntity() instanceof ItemFrame frame) {
-            if (queryProtection(frame).isPresent()) {
+            if (resolveProtection(frame).isPresent()) {
                 event.setCancelled(true);
             }
         }
@@ -157,7 +250,7 @@ public final class CodFrame extends JavaPlugin implements Listener {
     @EventHandler(ignoreCancelled = true)
     public void onFrameDamaging(EntityDamageEvent event) {
         if (event.getEntity() instanceof ItemFrame frame) {
-            if (queryProtection(frame).isPresent()) {
+            if (resolveProtection(frame).isPresent()) {
                 event.setCancelled(true);
             }
         }
@@ -166,7 +259,7 @@ public final class CodFrame extends JavaPlugin implements Listener {
     @EventHandler(ignoreCancelled = true)
     public void onFrameDamaging(EntityDamageByBlockEvent event) {
         if (event.getEntity() instanceof ItemFrame frame) {
-            if (queryProtection(frame).isPresent()) {
+            if (resolveProtection(frame).isPresent()) {
                 event.setCancelled(true);
             }
         }
@@ -175,8 +268,26 @@ public final class CodFrame extends JavaPlugin implements Listener {
     @EventHandler(ignoreCancelled = true)
     public void onFrameDamaging(EntityDamageByEntityEvent event) {
         if (event.getEntity() instanceof ItemFrame frame) {
-            if (queryProtection(frame).isPresent()) {
+            if (resolveProtection(frame).isPresent()) {
                 event.setCancelled(true);
+            }
+        }
+    }
+
+    /**
+     * Fires whenever a chunk's entities are loaded, including chunks that were
+     * already resident when the plugin enabled. HammerCore frames are imported here
+     * before any player can interact with them, and the event runs on the region
+     * thread that owns the entities, so direct entity access is safe on Folia too.
+     */
+    @EventHandler
+    public void onEntitiesLoad(EntitiesLoadEvent event) {
+        if (!migrateHammerCore) {
+            return;
+        }
+        for (Entity entity : event.getEntities()) {
+            if (entity instanceof ItemFrame frame) {
+                resolveProtection(frame);
             }
         }
     }
@@ -184,7 +295,7 @@ public final class CodFrame extends JavaPlugin implements Listener {
     @EventHandler(ignoreCancelled = true)
     public void interactFrame(PlayerInteractEntityEvent event) {
         if (event.getRightClicked() instanceof ItemFrame frame && event.getHand() == EquipmentSlot.HAND) {
-            Optional<UUID> uuid = queryProtection(frame);
+            Optional<UUID> uuid = resolveProtection(frame);
             if (event.getPlayer().isSneaking()) {
                 event.setCancelled(true);
                 playerDoProtection(event.getPlayer(), frame);
@@ -193,7 +304,7 @@ public final class CodFrame extends JavaPlugin implements Listener {
                 event.getPlayer().sendActionBar(
                         MINI_MESSAGE.deserialize(getConfig()
                                 .getString("messages.general.owner-info", "")
-                                .replace("<0>", getPlayerName(uuid.get()))
+                                .replace("<0>", getPlayerName(frame, uuid.get()))
                         )
                 );
                 if (frame.getItem().hasItemMeta()) {
@@ -208,10 +319,15 @@ public final class CodFrame extends JavaPlugin implements Listener {
         player.sendMessage(MINI_MESSAGE.deserialize(getConfig().getString("messages.general.hover-preview", "")).hoverEvent(item.asHoverEvent()));
     }
 
-    private @NotNull String getPlayerName(UUID uuid) {
+    private @NotNull String getPlayerName(ItemFrame frame, UUID uuid) {
         String cached = nameCache.get(uuid);
         if (cached != null) {
             return cached;
+        }
+        String stored = frame.getPersistentDataContainer().get(NAME_KEY, PersistentDataType.STRING);
+        if (stored != null && !stored.isBlank()) {
+            nameCache.put(uuid, stored);
+            return stored;
         }
         if (lastLoginAPI != null) {
             LastLoginPlayer lastLoginPlayer = lastLoginAPI.getPlayer(uuid);

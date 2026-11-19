@@ -22,6 +22,19 @@ CodFrame 能够保护展示框中的物品免遭爆炸、射击、岩浆、火�
 - `codframe.use` - 使用 `/codframe` 命令锁定/解锁展示框（默认：所有玩家）
 - `codframe.admin` - 绕过归属权检查，强制移除已存在的 CodFrame（默认：OP）
 
+## HammerCore 数据迁移
+
+本版本可直接接管 HammerCore 的 `item-frame-lock` 展示框保护数据。展示框所在区块加载、
+或被任何玩家/爆炸/交互访问时，CodFrame 会自动把旧数据转换为 CodFrame 格式：
+
+- `hammercore:owneruuid` + `hammercore:ownerusername`（以及 `hammercore:header`）
+  → `codframe:owner` + `codframe:owner_name`，随后删除旧键；
+- 所有者 UUID 与显示名称都会保留，转换后自动补上 `setFixed(true)` / `setInvulnerable(true)`；
+- 迁移由 `config.yml` 的 `migration.hammercore` 控制（默认 `true`）。
+
+> 说明：HammerCore 用 `new NamespacedKey(plugin, "ownerUUID")` 建键，该构造函数会把键名
+> 转成小写，所以磁盘上的实际键名是 `owneruuid` / `ownerusername`。
+
 ## 演示视频
 
 [![DemoVideo](http://img.youtube.com/vi/WFKfd7CN-BU/0.jpg)](https://www.youtube.com/watch?v=WFKfd7CN-BU)

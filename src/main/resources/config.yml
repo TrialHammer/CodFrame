@@ -1,3 +1,5 @@
+# CodFrame 1.3.0
+# 所有玩家可见文本均为 MiniMessage 格式。
 messages:
   general:
     hover-preview: "<gray>鼠标悬浮在此处查看物品信息."
@@ -10,3 +12,7 @@ messages:
     success-remove: "<gray>成功将鱼框恢复为普通展示框."
     failed-other-protected: "<red>无法保护 -- 此展示框已被 <0> 保护."
     failed-invalid: "<red>您必须将准星对准一个物品展示框!"
+migration:
+  # 自动将 HammerCore 的 item-frame-lock 数据迁移为 CodFrame 保护。
+  # 迁移会在展示框所在区块加载时执行，并保留原所有者与名称。
+  hammercore: true
